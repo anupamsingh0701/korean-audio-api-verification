@@ -346,6 +346,7 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     }
 
 @app.post("/verify")
+@app.post("/")
 async def verify_audio(req: AudioRequest):
     logger.info(f"Received request for audio_id: {req.audio_id}")
     
