@@ -54,17 +54,16 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     # Fallback to audio/wav
     return "audio/wav"
 
-async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
-    """Uses AIPipe proxy with gpt-4o-audio-preview to directly extract CSV data from audio."""
+async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
+    """Uses AIPipe OpenRouter proxy with google/gemini-2.5-flash to extract CSV from audio."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
         
-    base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1").rstrip("/")
+    base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openrouter/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
     
-    # OpenAI gpt-4o-audio-preview expects format to be either 'wav' or 'mp3'
-    fmt = "wav" if ext.lower() == "wav" else "mp3"
+    model_name = os.environ.get("AIPIPE_MODEL", "google/gemini-2.5-flash")
     
     prompt = (
         "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
@@ -81,9 +80,9 @@ async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
         "Content-Type": "application/json"
     }
     
+    # OpenRouter accepts audio format via the image_url schema containing a data URI
     payload = {
-        "model": "gpt-4o-audio-preview",
-        "modalities": ["text"],
+        "model": model_name,
         "messages": [
             {
                 "role": "user",
@@ -93,10 +92,9 @@ async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
                         "text": prompt
                     },
                     {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": fmt
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{audio_base64}"
                         }
                     }
                 ]
@@ -105,7 +103,7 @@ async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
         "temperature": 0.0
     }
     
-    logger.info("Extracting CSV via AIPipe gpt-4o-audio-preview...")
+    logger.info(f"Extracting CSV via AIPipe OpenRouter at {url} using {model_name}...")
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code == 200:
@@ -238,7 +236,7 @@ async def verify_audio(req: AudioRequest):
         )
         
     try:
-        csv_text = await get_aipipe_csv_extraction(base64_data, ext)
+        csv_text = await get_aipipe_csv_extraction(base64_data, mime_type)
     except Exception as e:
         logger.error(f"AIPipe extraction failed: {e}")
         raise HTTPException(
