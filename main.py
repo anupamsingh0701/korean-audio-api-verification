@@ -22,7 +22,7 @@ logger = logging.getLogger("korean-audio-api")
 
 app = FastAPI(
     title="Korean Audio Dataset Verification API",
-    description="Decodes base64 audio, transcribes it using Whisper/Gemini, parses tabular data, and computes statistics.",
+    description="Decodes base64 audio, transcribes it using Whisper/Gemini/AIPipe, parses tabular data, and computes statistics.",
     version="1.0.0"
 )
 
@@ -54,11 +54,88 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     # Fallback to audio/wav
     return "audio/wav"
 
-def get_gemini_csv_extraction(audio_base64: str, mime_type: str) -> Optional[str]:
+async def transcribe_audio_via_aipipe(audio_bytes: bytes, filename: str) -> Optional[str]:
+    """Uses AIPipe proxy to transcribe the audio file via OpenAI Whisper API."""
+    api_key = os.environ.get("AIPIPE_TOKEN")
+    if not api_key:
+        logger.info("AIPIPE_TOKEN not configured, skipping AIPipe transcription.")
+        return None
+        
+    url = "https://aipipe.org/openai/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    files = {
+        "file": (filename, audio_bytes, "audio/mpeg")
+    }
+    data = {
+        "model": "whisper-1"
+    }
+    
+    try:
+        logger.info("Transcribing audio via AIPipe (whisper-1)...")
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await client.post(url, headers=headers, files=files, data=data)
+            if response.status_code == 200:
+                result_text = response.json().get("text", "").strip()
+                logger.info("AIPipe transcription complete.")
+                return result_text
+            else:
+                logger.error(f"AIPipe transcription failed: HTTP {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Error calling AIPipe transcription: {e}")
+    return None
+
+async def convert_transcript_to_csv_via_aipipe(transcript: str) -> Optional[str]:
+    """Uses AIPipe proxy to convert text transcript to a CSV table using GPT-4o-mini."""
+    api_key = os.environ.get("AIPIPE_TOKEN")
+    if not api_key:
+        return None
+        
+    url = "https://aipipe.org/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    prompt = (
+        f"The text below is a transcript of an audio recording of a dataset/table being read:\n"
+        f"\"{transcript}\"\n\n"
+        f"Please convert this transcript into a clean CSV table with a header.\n"
+        f"Rules:\n"
+        f"1. Return ONLY the raw CSV text. Do not include markdown code block formatting (like ```csv) or other explanations.\n"
+        f"2. Ensure that numbers contain no formatting (no commas, no units)."
+    )
+    
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.0
+    }
+    
+    try:
+        logger.info("Converting transcript to CSV via AIPipe (gpt-4o-mini)...")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                csv_text = response.json()["choices"][0]["message"]["content"].strip()
+                if csv_text.startswith("```"):
+                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+                logger.info("AIPipe CSV conversion complete.")
+                return csv_text
+            else:
+                logger.error(f"AIPipe CSV conversion failed: HTTP {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Error calling AIPipe CSV conversion: {e}")
+    return None
+
+async def get_gemini_csv_extraction(audio_base64: str, mime_type: str) -> Optional[str]:
     """Uses Gemini API to transcribe and directly extract CSV data from audio."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logger.warning("GEMINI_API_KEY not configured, skipping primary Gemini extraction.")
+        logger.info("GEMINI_API_KEY not configured, skipping primary Gemini extraction.")
         return None
         
     model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -98,17 +175,18 @@ def get_gemini_csv_extraction(audio_base64: str, mime_type: str) -> Optional[str
     
     try:
         logger.info(f"Sending audio directly to Gemini {model_name} for CSV extraction...")
-        response = httpx.post(gemini_url, json=payload, timeout=60.0)
-        if response.status_code == 200:
-            result = response.json()
-            csv_text = result["contents"][0]["parts"][0]["text"].strip()
-            # Strip markdown if Gemini included it
-            if csv_text.startswith("```"):
-                csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            logger.info("Successfully extracted CSV using Gemini.")
-            return csv_text
-        else:
-            logger.error(f"Gemini API returned status {response.status_code}: {response.text}")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(gemini_url, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                csv_text = result["contents"][0]["parts"][0]["text"].strip()
+                # Strip markdown if Gemini included it
+                if csv_text.startswith("```"):
+                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+                logger.info("Successfully extracted CSV using Gemini.")
+                return csv_text
+            else:
+                logger.error(f"Gemini API returned status {response.status_code}: {response.text}")
     except Exception as e:
         logger.error(f"Error calling Gemini API: {e}")
     return None
@@ -128,7 +206,7 @@ def transcribe_local_whisper(audio_path: str) -> Optional[str]:
         logger.error(f"Local Whisper transcription failed: {e}")
     return None
 
-def convert_transcript_to_csv_via_gemini(transcript: str) -> Optional[str]:
+async def convert_transcript_to_csv_via_gemini(transcript: str) -> Optional[str]:
     """Uses Gemini API to convert text transcript to a CSV table."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -158,13 +236,14 @@ def convert_transcript_to_csv_via_gemini(transcript: str) -> Optional[str]:
     
     try:
         logger.info("Converting transcript to CSV using Gemini...")
-        response = httpx.post(gemini_url, json=payload, timeout=30.0)
-        if response.status_code == 200:
-            result = response.json()
-            csv_text = result["contents"][0]["parts"][0]["text"].strip()
-            if csv_text.startswith("```"):
-                csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            return csv_text
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(gemini_url, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                csv_text = result["contents"][0]["parts"][0]["text"].strip()
+                if csv_text.startswith("```"):
+                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+                return csv_text
     except Exception as e:
         logger.error(f"Failed to convert transcript to CSV: {e}")
     return None
@@ -282,10 +361,23 @@ async def verify_audio(req: AudioRequest):
     ext = mime_type.split("/")[-1]
     logger.info(f"Detected MIME type: {mime_type}, ext: {ext}")
     
-    # Try primary: Gemini Direct Extraction
-    csv_text = get_gemini_csv_extraction(base64_data, mime_type)
+    csv_text = None
     
-    # Fallback to local Whisper
+    # Method 1: Try AIPipe if token is available
+    if os.environ.get("AIPIPE_TOKEN"):
+        logger.info("Attempting transcription via AIPipe...")
+        filename = f"audio_{req.audio_id}.{ext}"
+        transcript = await transcribe_audio_via_aipipe(audio_bytes, filename)
+        if transcript:
+            logger.info(f"AIPipe transcript: {transcript}")
+            csv_text = await convert_transcript_to_csv_via_aipipe(transcript)
+            
+    # Method 2: Try Gemini Direct Extraction (fallback if AIPipe fails or isn't set)
+    if not csv_text and os.environ.get("GEMINI_API_KEY"):
+        logger.info("Attempting direct extraction via Gemini...")
+        csv_text = await get_gemini_csv_extraction(base64_data, mime_type)
+        
+    # Method 3: Try local Whisper fallback
     if not csv_text:
         logger.info("Attempting local Whisper fallback...")
         temp_filename = f"temp_{req.audio_id}.{ext}"
@@ -295,7 +387,7 @@ async def verify_audio(req: AudioRequest):
             transcript = transcribe_local_whisper(temp_filename)
             if transcript:
                 logger.info(f"Local transcript: {transcript}")
-                csv_text = convert_transcript_to_csv_via_gemini(transcript)
+                csv_text = await convert_transcript_to_csv_via_gemini(transcript)
         finally:
             if os.path.exists(temp_filename):
                 try:
