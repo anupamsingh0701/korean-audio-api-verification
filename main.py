@@ -54,37 +54,8 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     # Fallback to audio/wav
     return "audio/wav"
 
-async def transcribe_audio_via_aipipe(audio_bytes: bytes, filename: str, mime_type: str) -> str:
-    """Uses AIPipe proxy to transcribe the audio file via OpenAI Whisper API."""
-    api_key = os.environ.get("AIPIPE_TOKEN")
-    if not api_key:
-        raise ValueError("AIPIPE_TOKEN is not set in environment.")
-        
-    base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1").rstrip("/")
-    url = f"{base_url}/audio/transcriptions"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
-    files = {
-        "file": (filename, audio_bytes, mime_type)
-    }
-    data = {
-        "model": "whisper-1"
-    }
-    
-    logger.info(f"Transcribing audio via AIPipe at {url} (whisper-1)...")
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        response = await client.post(url, headers=headers, files=files, data=data)
-        if response.status_code == 200:
-            result_text = response.json().get("text", "").strip()
-            logger.info("AIPipe transcription complete.")
-            return result_text
-        else:
-            raise RuntimeError(f"AIPipe transcription returned status {response.status_code}: {response.text}")
-
-async def convert_transcript_to_csv_via_aipipe(transcript: str) -> str:
-    """Uses AIPipe proxy to convert text transcript to a CSV table using GPT-4o-mini."""
+async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
+    """Uses AIPipe proxy with gpt-4o-audio-preview to directly extract CSV data from audio."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
@@ -92,41 +63,54 @@ async def convert_transcript_to_csv_via_aipipe(transcript: str) -> str:
     base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
     
-    model_name = os.environ.get("AIPIPE_MODEL", "gpt-4o-mini")
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    # OpenAI gpt-4o-audio-preview expects format to be either 'wav' or 'mp3'
+    fmt = "wav" if ext.lower() == "wav" else "mp3"
     
     prompt = (
-        f"The text below is a transcript of an audio recording of a dataset/table being read:\n"
-        f"\"{transcript}\"\n\n"
-        f"Please convert this transcript into a clean CSV table with a header.\n"
-        f"Rules:\n"
-        f"1. Return ONLY the raw CSV text. Do not include markdown code block formatting (like ```csv) or other explanations.\n"
-        f"2. Ensure that numbers contain no formatting (no commas, no units)."
+        "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
+        "Please transcribe the audio, identify the table structure, and return the data as a clean CSV table. "
+        "Rules:\n"
+        "1. Return ONLY the raw CSV text. Do not include markdown code block formatting like ```csv or any other text.\n"
+        "2. Make sure the headers represent the columns read.\n"
+        "3. Ensure that all rows are correctly extracted.\n"
+        "4. If numeric values are read, ensure they are written as plain numbers (no commas or units)."
     )
     
     payload = {
-        "model": model_name,
+        "model": "gpt-4o-audio-preview",
+        "modalities": ["text"],
         "messages": [
-            {"role": "user", "content": prompt}
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": fmt
+                        }
+                    }
+                ]
+            }
         ],
         "temperature": 0.0
     }
     
-    logger.info(f"Converting transcript to CSV via AIPipe at {url} ({model_name})...")
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    logger.info("Extracting CSV via AIPipe gpt-4o-audio-preview...")
+    async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             csv_text = response.json()["choices"][0]["message"]["content"].strip()
             if csv_text.startswith("```"):
                 csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            logger.info("AIPipe CSV conversion complete.")
+            logger.info("AIPipe CSV extraction complete.")
             return csv_text
         else:
-            raise RuntimeError(f"AIPipe CSV conversion returned status {response.status_code}: {response.text}")
+            raise RuntimeError(f"AIPipe audio extraction returned status {response.status_code}: {response.text}")
 
 async def get_gemini_csv_extraction(audio_base64: str, mime_type: str) -> str:
     """Uses Gemini API to transcribe and directly extract CSV data from audio."""
@@ -356,17 +340,11 @@ async def verify_audio(req: AudioRequest):
     
     # Method 1: Try AIPipe if token is available
     if os.environ.get("AIPIPE_TOKEN"):
-        logger.info("Attempting transcription via AIPipe...")
-        filename = f"audio_{req.audio_id}.{ext}"
+        logger.info("Attempting transcription via AIPipe using gpt-4o-audio-preview...")
         try:
-            transcript = await transcribe_audio_via_aipipe(audio_bytes, filename, mime_type)
-            if transcript:
-                logger.info(f"AIPipe transcript: {transcript}")
-                csv_text = await convert_transcript_to_csv_via_aipipe(transcript)
-                if not csv_text:
-                    errors.append("AIPipe: Transcript was generated, but CSV parsing returned empty.")
-            else:
-                errors.append("AIPipe: Transcript returned empty.")
+            csv_text = await get_aipipe_csv_extraction(base64_data, ext)
+            if not csv_text:
+                errors.append("AIPipe: gpt-4o-audio-preview returned empty CSV.")
         except Exception as e:
             logger.error(f"AIPipe method failed: {e}")
             errors.append(f"AIPipe method failed: {str(e)}")
