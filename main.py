@@ -54,26 +54,28 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     # Fallback to audio/wav
     return "audio/wav"
 
-async def transcribe_audio_via_aipipe(audio_bytes: bytes, filename: str) -> Optional[str]:
+async def transcribe_audio_via_aipipe(audio_bytes: bytes, filename: str, mime_type: str) -> Optional[str]:
     """Uses AIPipe proxy to transcribe the audio file via OpenAI Whisper API."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         logger.info("AIPIPE_TOKEN not configured, skipping AIPipe transcription.")
         return None
         
-    url = "https://aipipe.org/openai/v1/audio/transcriptions"
+    base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1").rstrip("/")
+    url = f"{base_url}/audio/transcriptions"
+    
     headers = {
         "Authorization": f"Bearer {api_key}"
     }
     files = {
-        "file": (filename, audio_bytes, "audio/mpeg")
+        "file": (filename, audio_bytes, mime_type)
     }
     data = {
         "model": "whisper-1"
     }
     
     try:
-        logger.info("Transcribing audio via AIPipe (whisper-1)...")
+        logger.info(f"Transcribing audio via AIPipe at {url} (whisper-1)...")
         async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(url, headers=headers, files=files, data=data)
             if response.status_code == 200:
@@ -92,7 +94,11 @@ async def convert_transcript_to_csv_via_aipipe(transcript: str) -> Optional[str]
     if not api_key:
         return None
         
-    url = "https://aipipe.org/openai/v1/chat/completions"
+    base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1").rstrip("/")
+    url = f"{base_url}/chat/completions"
+    
+    model_name = os.environ.get("AIPIPE_MODEL", "gpt-4o-mini")
+    
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -108,7 +114,7 @@ async def convert_transcript_to_csv_via_aipipe(transcript: str) -> Optional[str]
     )
     
     payload = {
-        "model": "gpt-4o-mini",
+        "model": model_name,
         "messages": [
             {"role": "user", "content": prompt}
         ],
@@ -116,7 +122,7 @@ async def convert_transcript_to_csv_via_aipipe(transcript: str) -> Optional[str]
     }
     
     try:
-        logger.info("Converting transcript to CSV via AIPipe (gpt-4o-mini)...")
+        logger.info(f"Converting transcript to CSV via AIPipe at {url} ({model_name})...")
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code == 200:
@@ -367,7 +373,7 @@ async def verify_audio(req: AudioRequest):
     if os.environ.get("AIPIPE_TOKEN"):
         logger.info("Attempting transcription via AIPipe...")
         filename = f"audio_{req.audio_id}.{ext}"
-        transcript = await transcribe_audio_via_aipipe(audio_bytes, filename)
+        transcript = await transcribe_audio_via_aipipe(audio_bytes, filename, mime_type)
         if transcript:
             logger.info(f"AIPipe transcript: {transcript}")
             csv_text = await convert_transcript_to_csv_via_aipipe(transcript)
