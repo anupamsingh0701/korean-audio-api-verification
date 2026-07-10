@@ -58,12 +58,17 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str) -> str:
-    """Uses AIPipe proxy to extract CSV, trying OpenAI audio model first, falling back to Gemini."""
+    """Uses AIPipe OpenRouter proxy with Gemini for reliable audio transcription."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
         
-    errors = []
+    url = "https://aipipe.org/openrouter/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
     prompt = (
         "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
         "Please transcribe the audio, identify the table structure, and return the data as a clean CSV table. "
@@ -74,99 +79,39 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
         "4. If numeric values are read, ensure they are written as plain numbers (no commas or units)."
     )
     
-    # Stage 1: Try OpenAI gpt-4o-mini-audio-preview via direct AIPipe OpenAI proxy
-    try:
-        url = "https://aipipe.org/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        fmt = "wav" if ext.lower() == "wav" else "mp3"
-        payload = {
-            "model": "gpt-4o-mini-audio-preview",
-            "modalities": ["text"],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "input_audio",
-                            "input_audio": {
-                                "data": audio_base64,
-                                "format": fmt
-                            }
+    payload = {
+        "model": "google/gemini-2.5-flash",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{audio_base64}"
                         }
-                    ]
-                }
-            ],
-            "temperature": 0.0
-        }
-        logger.info("Attempting extraction via AIPipe OpenAI proxy (gpt-4o-mini-audio-preview)...")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            if response.status_code == 200:
-                csv_text = response.json()["choices"][0]["message"]["content"].strip()
-                if csv_text.startswith("```"):
-                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-                # Check for refusal keywords
-                if "sorry" in csv_text.lower() or "cannot process" in csv_text.lower():
-                    raise ValueError(f"Model returned text refusal: {csv_text}")
-                logger.info("AIPipe OpenAI proxy CSV extraction complete.")
-                return csv_text
-            else:
-                raise RuntimeError(f"OpenAI proxy returned status {response.status_code}: {response.text}")
-    except Exception as e:
-        logger.warning(f"AIPipe OpenAI method failed: {e}. Falling back to OpenRouter Gemini...")
-        errors.append(f"OpenAI (gpt-4o-mini-audio-preview) failed: {str(e)}")
-        
-    # Stage 2: Try OpenRouter google/gemini-2.5-flash via AIPipe OpenRouter proxy (Fallback)
-    try:
-        url = "https://aipipe.org/openrouter/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "google/gemini-2.5-flash",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{audio_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "temperature": 0.0
-        }
-        logger.info("Attempting extraction via AIPipe OpenRouter proxy (google/gemini-2.5-flash)...")
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            if response.status_code == 200:
-                csv_text = response.json()["choices"][0]["message"]["content"].strip()
-                if csv_text.startswith("```"):
-                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-                logger.info("AIPipe OpenRouter Gemini CSV extraction complete.")
-                return csv_text
-            else:
-                raise RuntimeError(f"OpenRouter proxy returned status {response.status_code}: {response.text}")
-    except Exception as e:
-        logger.error(f"AIPipe OpenRouter Gemini method failed: {e}")
-        errors.append(f"OpenRouter Gemini failed: {str(e)}")
-        
-    raise RuntimeError("All AIPipe extraction methods failed: " + " | ".join(errors))
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.0
+    }
+    
+    logger.info("Attempting extraction via AIPipe OpenRouter proxy (google/gemini-2.5-flash)...")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            csv_text = response.json()["choices"][0]["message"]["content"].strip()
+            if csv_text.startswith("```"):
+                csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+            logger.info("AIPipe OpenRouter Gemini CSV extraction complete.")
+            return csv_text
+        else:
+            raise RuntimeError(f"OpenRouter proxy returned status {response.status_code}: {response.text}")
 
 def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     """Computes all required statistics on a pandas DataFrame."""
@@ -235,10 +180,28 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
                     pass
                 allowed_values[col] = unique_vals
                 
-    # Correlation matrix of numeric columns
-    corr_df = df.corr(numeric_only=True)
-    corr_df = corr_df.where(pd.notnull(corr_df), None)
-    correlation_list = corr_df.values.tolist() if not corr_df.empty else []
+    # Correlation list format: [{"x": "col1", "y": "col2", "type": "positive"}]
+    correlation_list = []
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    if len(numeric_cols) >= 2:
+        corr_df = df[numeric_cols].corr(method="pearson")
+        for i in range(len(numeric_cols)):
+            for j in range(i + 1, len(numeric_cols)):
+                c1 = numeric_cols[i]
+                c2 = numeric_cols[j]
+                coef = corr_df.loc[c1, c2]
+                if pd.notnull(coef):
+                    if coef >= 0.3:
+                        ctype = "positive"
+                    elif coef <= -0.3:
+                        ctype = "negative"
+                    else:
+                        ctype = "none"
+                    correlation_list.append({
+                        "x": c1,
+                        "y": c2,
+                        "type": ctype
+                    })
     
     return {
         "rows": rows,
