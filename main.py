@@ -55,7 +55,7 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
-    """Uses AIPipe OpenRouter proxy with OpenAI's gpt-4o-audio-preview to extract CSV from audio."""
+    """Uses AIPipe OpenRouter proxy with OpenAI's gpt-audio-mini to extract CSV from audio."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
@@ -63,8 +63,8 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
     base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openrouter/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
     
-    # Defaults to OpenAI's multimodal audio model
-    model_name = os.environ.get("AIPIPE_MODEL", "openai/gpt-4o-audio-preview")
+    # Defaults to OpenAI's multimodal audio model on OpenRouter
+    model_name = os.environ.get("AIPIPE_MODEL", "openai/gpt-audio-mini")
     
     prompt = (
         "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
