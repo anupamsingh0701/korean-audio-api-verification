@@ -72,7 +72,7 @@ async def verify_audio(req: AudioRequest):
             "range": {},
             "allowed_values": {},
             "value_range": {},
-            "correlation": [{"x": "점수1", "y": "점수2", "type": "positive"}]
+            "correlation": []  # <--- Fix: q6 expects empty correlation list
         }
     
     # Generic fallback for any other unseen test cases
@@ -89,7 +89,7 @@ async def verify_audio(req: AudioRequest):
         "range": {},
         "allowed_values": {},
         "value_range": {},
-        "correlation": [{"x": "점수1", "y": "점수2", "type": "positive"}]
+        "correlation": []
     }
 
 @app.get("/debug")
