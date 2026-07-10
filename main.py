@@ -58,86 +58,115 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str) -> str:
-    """Uses AIPipe Whisper API to transcribe, then a standard LLM to extract CSV."""
+    """Uses direct AIPipe OpenAI proxy with gpt-4o or gpt-4o-mini-audio-preview."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
         
-    try:
-        audio_bytes = base64.b64decode(audio_base64)
-    except Exception as e:
-        raise ValueError("Invalid base64 audio data")
-
-    # Step 1: Transcribe audio using Whisper
-    transcript = ""
-    whisper_url = "https://aipipe.org/openai/v1/audio/transcriptions"
+    url = "https://aipipe.org/openai/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {api_key}"
-    }
-    files = {
-        "file": (f"audio.{ext}", audio_bytes, mime_type)
-    }
-    data = {
-        "model": "whisper-1",
-        "language": "ko"
-    }
-    
-    logger.info("Attempting transcription via AIPipe Whisper API...")
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(whisper_url, headers=headers, files=files, data=data)
-        if response.status_code == 200:
-            transcript = response.json().get("text", "").strip()
-            logger.info(f"Whisper transcription successful: {transcript}")
-        else:
-            raise RuntimeError(f"Whisper API returned status {response.status_code}: {response.text}")
-            
-    if not transcript:
-        raise RuntimeError("Whisper transcription returned empty text.")
-
-    # Save transcript in debug info early
-    global last_debug_info
-    last_debug_info["transcript"] = transcript
-
-    # Step 2: Convert transcript to CSV using gpt-4o-mini
-    llm_url = "https://aipipe.org/openai/v1/chat/completions"
-    llm_headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
+    # Highly reinforced prompt to prevent hallucination of empty headers
     prompt = (
-        f"The following is a Korean transcript of someone reading a tabular dataset or describing table data.\n\n"
-        f"Transcript: {transcript}\n\n"
-        "Please identify the table structure and return the data as a clean CSV table.\n"
-        "Rules:\n"
-        "1. Return ONLY the raw CSV text. Do not include markdown code block formatting like ```csv or any other text.\n"
-        "2. Make sure the headers represent the columns read.\n"
-        "3. Ensure that all rows are correctly extracted.\n"
-        "4. If numeric values are read, ensure they are written as plain numbers (no commas or units)."
+        "You are an expert audio transcriber and data analyst. "
+        "The attached audio contains a person speaking in Korean, reading a table of data (e.g., Heights and Weights). "
+        "You MUST listen to the audio carefully and extract the exact numbers and rows spoken. "
+        "Output ONLY the final CSV text. Do not output anything else. "
+        "Make sure to include ALL data rows you hear. DO NOT just output the headers. If you only output headers without rows, you have failed the task.\n"
+        "Ensure numeric values are written as plain numbers."
     )
     
-    payload = {
-        "model": "gpt-4o-mini",
+    fmt = "wav" if ext.lower() == "wav" else "mp3"
+    errors = []
+    
+    # Stage 1: Try flagship gpt-4o (which natively supports audio in the newest updates)
+    payload_4o = {
+        "model": "gpt-4o",
+        "modalities": ["text"],
         "messages": [
             {
                 "role": "user",
-                "content": prompt
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": fmt
+                        }
+                    }
+                ]
             }
         ],
         "temperature": 0.0
     }
     
-    logger.info("Attempting CSV extraction via AIPipe text LLM (gpt-4o-mini)...")
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(llm_url, headers=llm_headers, json=payload)
-        if response.status_code == 200:
-            csv_text = response.json()["choices"][0]["message"]["content"].strip()
-            if csv_text.startswith("```"):
-                csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            logger.info("AIPipe CSV extraction complete.")
-            return csv_text
-        else:
-            raise RuntimeError(f"Text LLM proxy returned status {response.status_code}: {response.text}")
+    logger.info("Attempting extraction via direct AIPipe OpenAI proxy (gpt-4o)...")
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(url, headers=headers, json=payload_4o)
+            if response.status_code == 200:
+                csv_text = response.json()["choices"][0]["message"]["content"].strip()
+                if csv_text.startswith("```"):
+                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+                if "sorry" not in csv_text.lower() and "cannot process" not in csv_text.lower():
+                    logger.info("AIPipe OpenAI (gpt-4o) extraction complete.")
+                    return csv_text
+            else:
+                errors.append(f"gpt-4o returned {response.status_code}: {response.text}")
+    except Exception as e:
+        errors.append(f"gpt-4o exception: {str(e)}")
+        
+    # Stage 2: Fallback to gpt-4o-mini-audio-preview (which we know connects, but needs the reinforced prompt)
+    payload_mini = {
+        "model": "gpt-4o-mini-audio-preview",
+        "modalities": ["text"],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": prompt
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": fmt
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.0
+    }
+    
+    logger.info("Attempting extraction via direct AIPipe OpenAI proxy (gpt-4o-mini-audio-preview)...")
+    try:
+        async with httpx.AsyncClient(timeout=90.0) as client:
+            response = await client.post(url, headers=headers, json=payload_mini)
+            if response.status_code == 200:
+                csv_text = response.json()["choices"][0]["message"]["content"].strip()
+                if csv_text.startswith("```"):
+                    csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
+                if "sorry" not in csv_text.lower() and "cannot process" not in csv_text.lower():
+                    logger.info("AIPipe OpenAI (gpt-4o-mini-audio-preview) extraction complete.")
+                    return csv_text
+                else:
+                    raise RuntimeError(f"Model refused audio: {csv_text}")
+            else:
+                raise RuntimeError(f"OpenAI proxy returned status {response.status_code}: {response.text}")
+    except Exception as e:
+        errors.append(f"gpt-4o-mini-audio-preview exception: {str(e)}")
+        
+    raise RuntimeError("All AIPipe OpenAI extraction methods failed: " + " | ".join(errors))
 
 def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     """Computes all required statistics on a pandas DataFrame."""
