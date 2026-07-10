@@ -227,12 +227,13 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
         else:
             # Allowed unique values (exclude NaN) - only for non-numeric/categorical columns
             unique_vals = df[col].dropna().unique().tolist()
-            unique_vals = [v.item() if hasattr(v, "item") else v for v in unique_vals]
-            try:
-                unique_vals.sort()
-            except Exception:
-                pass
-            allowed_values[col] = unique_vals
+            if len(unique_vals) > 0:
+                unique_vals = [v.item() if hasattr(v, "item") else v for v in unique_vals]
+                try:
+                    unique_vals.sort()
+                except Exception:
+                    pass
+                allowed_values[col] = unique_vals
                 
     # Correlation matrix of numeric columns
     corr_df = df.corr(numeric_only=True)
@@ -334,20 +335,6 @@ async def verify_audio(req: AudioRequest):
         "dtypes": {col: str(df[col].dtype) for col in df.columns},
         "df_json": df.to_dict(orient="records")
     }
-    
-    # DEBUG CHECKS: Throw 500 error if expected numeric columns are resolved as categorical
-    debug_msg = []
-    for col in df.columns:
-        is_num = pd.api.types.is_numeric_dtype(df[col])
-        debug_msg.append(f"Col '{col}': dtype={df[col].dtype}, is_numeric={is_num}, sample={list(df[col].head(3))}")
-    
-    should_be_numeric = {"키", "몸무게", "weight", "height"}
-    bad_cols = [col for col in df.columns if col.lower() in should_be_numeric and not pd.api.types.is_numeric_dtype(df[col])]
-    if bad_cols:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"DEBUGGING CHECKPOINT: Column(s) {bad_cols} failed numeric parsing. Details: {' | '.join(debug_msg)}. Raw CSV: {csv_text}"
-        )
         
     # Compute stats
     stats = compute_dataframe_statistics(df)
