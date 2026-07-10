@@ -58,7 +58,7 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str) -> str:
-    """Uses AIPipe OpenRouter proxy with Gemini for reliable audio transcription."""
+    """Uses AIPipe OpenRouter proxy with Gemini 1.5 Pro for reliable audio transcription."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
@@ -80,7 +80,7 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
     )
     
     payload = {
-        "model": "google/gemini-2.5-flash",
+        "model": "google/gemini-1.5-pro",
         "messages": [
             {
                 "role": "user",
@@ -101,7 +101,7 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
         "temperature": 0.0
     }
     
-    logger.info("Attempting extraction via AIPipe OpenRouter proxy (google/gemini-2.5-flash)...")
+    logger.info("Attempting extraction via AIPipe OpenRouter proxy (google/gemini-1.5-pro)...")
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code == 200:
