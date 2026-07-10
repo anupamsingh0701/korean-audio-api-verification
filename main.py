@@ -54,7 +54,7 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     # Fallback to audio/wav
     return "audio/wav"
 
-async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
+async def get_aipipe_csv_extraction(audio_base64: str, ext: str) -> str:
     """Uses AIPipe OpenRouter proxy with OpenAI's gpt-audio-mini to extract CSV from audio."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
@@ -81,9 +81,12 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
         "Content-Type": "application/json"
     }
     
-    # OpenRouter accepts audio format via the image_url schema containing a data URI
+    # OpenAI native audio models expect 'input_audio' structure with format as 'wav' or 'mp3'
+    fmt = "wav" if ext.lower() == "wav" else "mp3"
+    
     payload = {
         "model": model_name,
+        "modalities": ["text"],
         "messages": [
             {
                 "role": "user",
@@ -93,9 +96,10 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
                         "text": prompt
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{audio_base64}"
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": fmt
                         }
                     }
                 ]
@@ -233,7 +237,7 @@ async def verify_audio(req: AudioRequest):
         )
         
     try:
-        csv_text = await get_aipipe_csv_extraction(base64_data, mime_type)
+        csv_text = await get_aipipe_csv_extraction(base64_data, ext)
     except Exception as e:
         logger.error(f"AIPipe extraction failed: {e}")
         raise HTTPException(
