@@ -58,12 +58,12 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str) -> str:
-    """Uses AIPipe OpenRouter proxy with Gemini 1.5 Flash for reliable audio transcription."""
+    """Uses direct AIPipe OpenAI proxy with the full gpt-4o-audio-preview model."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
         
-    url = "https://aipipe.org/openrouter/v1/chat/completions"
+    url = "https://aipipe.org/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
@@ -79,8 +79,11 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
         "4. If numeric values are read, ensure they are written as plain numbers (no commas or units)."
     )
     
+    fmt = "wav" if ext.lower() == "wav" else "mp3"
+    
     payload = {
-        "model": "google/gemini-1.5-flash",
+        "model": "gpt-4o-audio-preview",
+        "modalities": ["text"],
         "messages": [
             {
                 "role": "user",
@@ -90,9 +93,10 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
                         "text": prompt
                     },
                     {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{mime_type};base64,{audio_base64}"
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": fmt
                         }
                     }
                 ]
@@ -101,17 +105,22 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
         "temperature": 0.0
     }
     
-    logger.info("Attempting extraction via AIPipe OpenRouter proxy (google/gemini-1.5-flash)...")
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    logger.info("Attempting extraction via direct AIPipe OpenAI proxy (gpt-4o-audio-preview)...")
+    async with httpx.AsyncClient(timeout=90.0) as client:
         response = await client.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             csv_text = response.json()["choices"][0]["message"]["content"].strip()
             if csv_text.startswith("```"):
                 csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            logger.info("AIPipe OpenRouter Gemini CSV extraction complete.")
+            
+            # Check for generic LLM audio refusal messages
+            if "sorry" in csv_text.lower() or "cannot process" in csv_text.lower():
+                raise RuntimeError(f"OpenAI Model returned text refusal instead of data: {csv_text}")
+                
+            logger.info("AIPipe OpenAI CSV extraction complete.")
             return csv_text
         else:
-            raise RuntimeError(f"OpenRouter proxy returned status {response.status_code}: {response.text}")
+            raise RuntimeError(f"OpenAI proxy returned status {response.status_code}: {response.text}")
 
 def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     """Computes all required statistics on a pandas DataFrame."""
