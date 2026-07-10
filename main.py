@@ -312,10 +312,10 @@ async def verify_audio(req: AudioRequest):
                 cleaned = df[col].str.replace(r'[\s,%\$]|cm|kg|m', '', regex=True, case=False)
                 coerced = pd.to_numeric(cleaned, errors='coerce')
                 
-                # If everything converted successfully, replace with coerced values
+                # Coerce if at least 50% of values convert successfully (to handle notes or missing values)
                 non_null_orig = df[col].dropna().shape[0]
                 non_null_coerced = coerced.dropna().shape[0]
-                if non_null_orig > 0 and non_null_coerced == non_null_orig:
+                if non_null_orig > 0 and (non_null_coerced / non_null_orig) >= 0.5:
                     df[col] = coerced
     except Exception as e:
         logger.error(f"Failed to parse CSV text into DataFrame: {e}")
