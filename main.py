@@ -68,6 +68,7 @@ Your job is to extract the EXACT constraints requested into a strict JSON format
 RULES:
 1. `rows`: Integer count of rows (e.g. 100).
 2. `columns`: Array of strings for ANY AND ALL variables or features mentioned (e.g. if '키' and '몸무게' are mentioned, output ["키", "몸무게"], if '성별' is mentioned output ["성별"]). This is required if any variables are mentioned.
+   **CRITICAL: Remove all spaces from column names (e.g., '점수 1' MUST be output as '점수1', '성 별' MUST be output as '성별').**
 3. For all other fields (mean, std, variance, min, max, median, mode, range, allowed_values, value_range, correlation): 
    ONLY populate them if they are EXPLICITLY mentioned in the text! Otherwise, leave them as empty objects `{}` or empty arrays `[]`.
 4. `allowed_values`: Map column name to array of allowed values. (e.g. if '성별' only allows '남' and '여', output {"성별": ["남", "여"]}).
@@ -106,7 +107,26 @@ OUTPUT EXACTLY THIS JSON SCHEMA:
             raise RuntimeError(f"Groq Llama returned {response.status_code}: {response.text}")
             
         content = response.json()["choices"][0]["message"]["content"]
-        return json_lib.loads(content)
+        
+        parsed_json = json_lib.loads(content)
+        
+        # Safety enforcement script to aggressively strip spaces from keys/column arrays
+        if "columns" in parsed_json:
+            parsed_json["columns"] = [col.replace(" ", "") for col in parsed_json["columns"]]
+            
+        for key in ["mean", "std", "variance", "min", "max", "median", "mode", "range", "allowed_values", "value_range"]:
+            if key in parsed_json and isinstance(parsed_json[key], dict):
+                cleaned_dict = {k.replace(" ", ""): v for k, v in parsed_json[key].items()}
+                parsed_json[key] = cleaned_dict
+                
+        if "correlation" in parsed_json and isinstance(parsed_json["correlation"], list):
+            for i in range(len(parsed_json["correlation"])):
+                if "x" in parsed_json["correlation"][i]:
+                    parsed_json["correlation"][i]["x"] = parsed_json["correlation"][i]["x"].replace(" ", "")
+                if "y" in parsed_json["correlation"][i]:
+                    parsed_json["correlation"][i]["y"] = parsed_json["correlation"][i]["y"].replace(" ", "")
+                    
+        return parsed_json
 
 @app.post("/verify")
 @app.post("/")
