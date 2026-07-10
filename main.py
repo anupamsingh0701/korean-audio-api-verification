@@ -321,6 +321,20 @@ async def verify_audio(req: AudioRequest):
         logger.error(f"Failed to parse CSV text into DataFrame: {e}")
         raise HTTPException(status_code=500, detail="Extracted CSV format is invalid.")
         
+    # DEBUG CHECKS: Throw 500 error if expected numeric columns are resolved as categorical
+    debug_msg = []
+    for col in df.columns:
+        is_num = pd.api.types.is_numeric_dtype(df[col])
+        debug_msg.append(f"Col '{col}': dtype={df[col].dtype}, is_numeric={is_num}, sample={list(df[col].head(3))}")
+    
+    should_be_numeric = {"키", "몸무게", "weight", "height"}
+    bad_cols = [col for col in df.columns if col.lower() in should_be_numeric and not pd.api.types.is_numeric_dtype(df[col])]
+    if bad_cols:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"DEBUGGING CHECKPOINT: Column(s) {bad_cols} failed numeric parsing. Details: {' | '.join(debug_msg)}. Raw CSV: {csv_text}"
+        )
+        
     # Compute stats
     stats = compute_dataframe_statistics(df)
     logger.info(f"Successfully computed statistics for {req.audio_id}: {stats}")
