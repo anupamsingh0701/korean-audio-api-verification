@@ -256,7 +256,18 @@ async def verify_audio(req: AudioRequest):
         df.columns = [c.strip() for c in df.columns]
         for col in df.columns:
             if df[col].dtype == object:
+                # Strip spaces
                 df[col] = df[col].astype(str).str.strip()
+                
+                # Robust numeric cleanup: try converting to numeric after stripping common units/commas
+                cleaned = df[col].str.replace(r'[\s,%\$]|cm|kg|m', '', regex=True, case=False)
+                coerced = pd.to_numeric(cleaned, errors='coerce')
+                
+                # If everything converted successfully, replace with coerced values
+                non_null_orig = df[col].dropna().shape[0]
+                non_null_coerced = coerced.dropna().shape[0]
+                if non_null_orig > 0 and non_null_coerced == non_null_orig:
+                    df[col] = coerced
     except Exception as e:
         logger.error(f"Failed to parse CSV text into DataFrame: {e}")
         raise HTTPException(status_code=500, detail="Extracted CSV format is invalid.")
