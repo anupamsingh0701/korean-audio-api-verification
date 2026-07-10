@@ -55,7 +55,7 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
-    """Uses AIPipe OpenRouter proxy with google/gemini-2.5-flash to extract CSV from audio."""
+    """Uses AIPipe OpenRouter proxy with OpenAI's gpt-4o-audio-preview to extract CSV from audio."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
@@ -63,7 +63,8 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str) -> str:
     base_url = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openrouter/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
     
-    model_name = os.environ.get("AIPIPE_MODEL", "google/gemini-2.5-flash")
+    # Defaults to OpenAI's multimodal audio model
+    model_name = os.environ.get("AIPIPE_MODEL", "openai/gpt-4o-audio-preview")
     
     prompt = (
         "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
@@ -132,38 +133,26 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     value_range = {}
     
     for col in df.columns:
-        # Check if numeric
         is_numeric = pd.api.types.is_numeric_dtype(df[col])
         
-        # Allowed unique values (exclude NaN)
-        unique_vals = df[col].dropna().unique().tolist()
-        # Convert numpy types to python native types
-        unique_vals = [v.item() if hasattr(v, "item") else v for v in unique_vals]
-        try:
-            unique_vals.sort()
-        except Exception:
-            pass
-        allowed_values[col] = unique_vals
-        
-        # Min
-        val_min = df[col].min()
-        if pd.notnull(val_min):
-            min_dict[col] = float(val_min) if is_numeric else str(val_min)
-            
-        # Max
-        val_max = df[col].max()
-        if pd.notnull(val_max):
-            max_dict[col] = float(val_max) if is_numeric else str(val_max)
-            
-        # Mode
+        # Mode can apply to all types (first mode value)
         modes = df[col].mode()
         if not modes.empty:
             val_mode = modes.iloc[0]
             if pd.notnull(val_mode):
                 mode_dict[col] = float(val_mode) if is_numeric else str(val_mode)
                 
-        # Numeric-only stats
         if is_numeric:
+            # Min
+            val_min = df[col].min()
+            if pd.notnull(val_min):
+                min_dict[col] = float(val_min)
+                
+            # Max
+            val_max = df[col].max()
+            if pd.notnull(val_max):
+                max_dict[col] = float(val_max)
+                
             val_mean = df[col].mean()
             if pd.notnull(val_mean):
                 mean_dict[col] = float(val_mean)
@@ -183,10 +172,18 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
             if pd.notnull(val_min) and pd.notnull(val_max):
                 range_dict[col] = float(val_max - val_min)
                 value_range[col] = [float(val_min), float(val_max)]
+        else:
+            # Allowed unique values (exclude NaN) - only for non-numeric/categorical columns
+            unique_vals = df[col].dropna().unique().tolist()
+            unique_vals = [v.item() if hasattr(v, "item") else v for v in unique_vals]
+            try:
+                unique_vals.sort()
+            except Exception:
+                pass
+            allowed_values[col] = unique_vals
                 
     # Correlation matrix of numeric columns
     corr_df = df.corr(numeric_only=True)
-    # Replace NaN with None for JSON compliance
     corr_df = corr_df.where(pd.notnull(corr_df), None)
     correlation_list = corr_df.values.tolist() if not corr_df.empty else []
     
