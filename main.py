@@ -58,20 +58,57 @@ def detect_mime_type(audio_bytes: bytes) -> str:
     return "audio/wav"
 
 async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str) -> str:
-    """Uses direct AIPipe OpenAI proxy with the full gpt-4o-audio-preview model."""
+    """Uses AIPipe Whisper API to transcribe, then a standard LLM to extract CSV."""
     api_key = os.environ.get("AIPIPE_TOKEN")
     if not api_key:
         raise ValueError("AIPIPE_TOKEN is not set in environment.")
         
-    url = "https://aipipe.org/openai/v1/chat/completions"
+    try:
+        audio_bytes = base64.b64decode(audio_base64)
+    except Exception as e:
+        raise ValueError("Invalid base64 audio data")
+
+    # Step 1: Transcribe audio using Whisper
+    transcript = ""
+    whisper_url = "https://aipipe.org/openai/v1/audio/transcriptions"
     headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    files = {
+        "file": (f"audio.{ext}", audio_bytes, mime_type)
+    }
+    data = {
+        "model": "whisper-1",
+        "language": "ko"
+    }
+    
+    logger.info("Attempting transcription via AIPipe Whisper API...")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(whisper_url, headers=headers, files=files, data=data)
+        if response.status_code == 200:
+            transcript = response.json().get("text", "").strip()
+            logger.info(f"Whisper transcription successful: {transcript}")
+        else:
+            raise RuntimeError(f"Whisper API returned status {response.status_code}: {response.text}")
+            
+    if not transcript:
+        raise RuntimeError("Whisper transcription returned empty text.")
+
+    # Save transcript in debug info early
+    global last_debug_info
+    last_debug_info["transcript"] = transcript
+
+    # Step 2: Convert transcript to CSV using gpt-4o-mini
+    llm_url = "https://aipipe.org/openai/v1/chat/completions"
+    llm_headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     
     prompt = (
-        "The following audio contains speech (in Korean) reading a tabular dataset or describing table data. "
-        "Please transcribe the audio, identify the table structure, and return the data as a clean CSV table. "
+        f"The following is a Korean transcript of someone reading a tabular dataset or describing table data.\n\n"
+        f"Transcript: {transcript}\n\n"
+        "Please identify the table structure and return the data as a clean CSV table.\n"
         "Rules:\n"
         "1. Return ONLY the raw CSV text. Do not include markdown code block formatting like ```csv or any other text.\n"
         "2. Make sure the headers represent the columns read.\n"
@@ -79,48 +116,28 @@ async def get_aipipe_csv_extraction(audio_base64: str, mime_type: str, ext: str)
         "4. If numeric values are read, ensure they are written as plain numbers (no commas or units)."
     )
     
-    fmt = "wav" if ext.lower() == "wav" else "mp3"
-    
     payload = {
-        "model": "gpt-4o-audio-preview",
-        "modalities": ["text"],
+        "model": "gpt-4o-mini",
         "messages": [
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": prompt
-                    },
-                    {
-                        "type": "input_audio",
-                        "input_audio": {
-                            "data": audio_base64,
-                            "format": fmt
-                        }
-                    }
-                ]
+                "content": prompt
             }
         ],
         "temperature": 0.0
     }
     
-    logger.info("Attempting extraction via direct AIPipe OpenAI proxy (gpt-4o-audio-preview)...")
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        response = await client.post(url, headers=headers, json=payload)
+    logger.info("Attempting CSV extraction via AIPipe text LLM (gpt-4o-mini)...")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(llm_url, headers=llm_headers, json=payload)
         if response.status_code == 200:
             csv_text = response.json()["choices"][0]["message"]["content"].strip()
             if csv_text.startswith("```"):
                 csv_text = re.sub(r"^```(?:csv)?\n|```$", "", csv_text, flags=re.MULTILINE).strip()
-            
-            # Check for generic LLM audio refusal messages
-            if "sorry" in csv_text.lower() or "cannot process" in csv_text.lower():
-                raise RuntimeError(f"OpenAI Model returned text refusal instead of data: {csv_text}")
-                
-            logger.info("AIPipe OpenAI CSV extraction complete.")
+            logger.info("AIPipe CSV extraction complete.")
             return csv_text
         else:
-            raise RuntimeError(f"OpenAI proxy returned status {response.status_code}: {response.text}")
+            raise RuntimeError(f"Text LLM proxy returned status {response.status_code}: {response.text}")
 
 def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
     """Computes all required statistics on a pandas DataFrame."""
@@ -232,6 +249,12 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
 @app.post("/")
 async def verify_audio(req: AudioRequest):
     global last_debug_info
+    
+    # Initialize debug info
+    last_debug_info = {
+        "audio_id": req.audio_id,
+    }
+    
     logger.info(f"Received request for audio_id: {req.audio_id}")
     
     # Strip any possible data uri prefix from base64
@@ -298,15 +321,14 @@ async def verify_audio(req: AudioRequest):
         logger.error(f"Failed to parse CSV text into DataFrame: {e}")
         raise HTTPException(status_code=500, detail="Extracted CSV format is invalid.")
         
-    # Store extraction details for debugging
-    last_debug_info = {
-        "audio_id": req.audio_id,
+    # Store final extraction details for debugging
+    last_debug_info.update({
         "mime_type": mime_type,
         "csv_text": csv_text,
         "columns": list(df.columns),
         "dtypes": {col: str(df[col].dtype) for col in df.columns},
         "df_json": df.to_dict(orient="records")
-    }
+    })
         
     # Compute stats
     stats = compute_dataframe_statistics(df)
