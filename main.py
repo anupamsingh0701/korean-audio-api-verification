@@ -39,6 +39,9 @@ class AudioRequest(BaseModel):
     audio_id: str = Field(..., description="ID of the audio query")
     audio_base64: str = Field(..., description="Base64-encoded audio string")
 
+# Global dict to store the last extraction details for debugging
+last_debug_info = {}
+
 def detect_mime_type(audio_bytes: bytes) -> str:
     """Detects audio mime type from bytes header."""
     if audio_bytes.startswith(b"RIFF") and b"WAVE" in audio_bytes[:15]:
@@ -255,6 +258,7 @@ def compute_dataframe_statistics(df: pd.DataFrame) -> Dict[str, Any]:
 @app.post("/verify")
 @app.post("/")
 async def verify_audio(req: AudioRequest):
+    global last_debug_info
     logger.info(f"Received request for audio_id: {req.audio_id}")
     
     # Strip any possible data uri prefix from base64
@@ -321,6 +325,16 @@ async def verify_audio(req: AudioRequest):
         logger.error(f"Failed to parse CSV text into DataFrame: {e}")
         raise HTTPException(status_code=500, detail="Extracted CSV format is invalid.")
         
+    # Store extraction details for debugging
+    last_debug_info = {
+        "audio_id": req.audio_id,
+        "mime_type": mime_type,
+        "csv_text": csv_text,
+        "columns": list(df.columns),
+        "dtypes": {col: str(df[col].dtype) for col in df.columns},
+        "df_json": df.to_dict(orient="records")
+    }
+    
     # DEBUG CHECKS: Throw 500 error if expected numeric columns are resolved as categorical
     debug_msg = []
     for col in df.columns:
@@ -339,6 +353,10 @@ async def verify_audio(req: AudioRequest):
     stats = compute_dataframe_statistics(df)
     logger.info(f"Successfully computed statistics for {req.audio_id}: {stats}")
     return stats
+
+@app.get("/debug")
+async def get_debug():
+    return last_debug_info
 
 @app.get("/")
 async def root():
